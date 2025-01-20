@@ -1,0 +1,118 @@
+const { Client } = require("pg"); // PostgreSQL client for SQL queries
+
+// Database connection settings
+const client = new Client({
+  user: "your_username",
+  host: "your_database_host",
+  database: "sap_concur",
+  password: "your_password",
+  port: 5432, // Default PostgreSQL port
+});
+
+// Utility function: Check if a year is a leap year
+const isLeapYear = (year) => {
+  return (year % 4 === 0 && year % 100 !== 0) || (year % 400 === 0);
+};
+
+// Utility function: Parse and standardize dates
+const parseDate = (rawDate) => {
+  // Example rawDate formats: "20230101", "1-2-2023", "Feb 29 2020"
+  const datePatterns = [
+    /^\d{8}$/, // YYYYMMDD
+    /^\d{1,2}-\d{1,2}-\d{4}$/, // MM-DD-YYYY or M-D-YYYY
+    /^[A-Za-z]{3} \d{1,2} \d{4}$/, // Month DD YYYY
+  ];
+
+  for (const pattern of datePatterns) {
+    if (pattern.test(rawDate)) {
+      let date;
+      if (pattern === datePatterns[0]) {
+        // Handle YYYYMMDD
+        const year = parseInt(rawDate.substring(0, 4), 10);
+        const month = parseInt(rawDate.substring(4, 6), 10);
+        const day = parseInt(rawDate.substring(6, 8), 10);
+
+        // Leap year validation
+        if (month === 2 && day === 29 && !isLeapYear(year)) {
+          throw new Error(`Invalid date: ${rawDate} (Not a leap year)`);
+        }
+        date = new Date(year, month - 1, day);
+      } else {
+        // Let JavaScript's Date.parse handle other formats
+        date = new Date(rawDate);
+        if (isNaN(date)) throw new Error(`Invalid date format: ${rawDate}`);
+      }
+
+      return date.toISOString(); // Return standardized ISO format
+    }
+  }
+
+  throw new Error(`Unrecognized date format: ${rawDate}`);
+};
+
+// Utility function: Transform nested expense data
+const transformExpenses = (expenseJson) => {
+  try {
+    const expenses = JSON.parse(expenseJson);
+    return expenses.map((expense) => ({
+      category: expense.category || "Unknown",
+      amount: parseFloat(expense.amount || 0).toFixed(2),
+      currency: expense.currency || "USD",
+    }));
+  } catch (err) {
+    console.error("Error parsing expense JSON:", err.message);
+    return [];
+  }
+};
+
+// Main data transformation function
+const transformData = async () => {
+  try {
+    await client.connect();
+    console.log("Connected to the database.");
+
+    // Example SQL query fetching raw data
+    const res = await client.query(`
+      SELECT 
+        trip_id,
+        employee_id,
+        raw_date,       -- Non-standard date format
+        destination,
+        expense_details -- JSON-like nested field
+      FROM travel_expenses
+    `);
+
+    const standardizedData = res.rows.map((row) => {
+      // Transform raw date
+      let standardizedDate;
+      try {
+        standardizedDate = parseDate(row.raw_date);
+      } catch (err) {
+        console.warn(`Skipping invalid date for trip_id ${row.trip_id}:`, err.message);
+        standardizedDate = null; // Fallback if date is invalid
+      }
+
+      // Transform nested expense data
+      const transformedExpenses = transformExpenses(row.expense_details);
+
+      return {
+        tripId: row.trip_id,
+        employeeId: row.employee_id,
+        date: standardizedDate,
+        destination: row.destination,
+        expenses: transformedExpenses,
+      };
+    });
+
+    console.log("Transformed Data:", JSON.stringify(standardizedData, null, 2));
+    return standardizedData;
+  } catch (err) {
+    console.error("Error during data transformation:", err.message);
+  } finally {
+    await client.end();
+    console.log("Database connection closed.");
+  }
+};
+
+// Execute the transformation
+transformData();
